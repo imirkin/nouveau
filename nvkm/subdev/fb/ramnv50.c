@@ -60,7 +60,231 @@ struct nv50_ram {
 	struct nv50_ramseq hwsq;
 };
 
-#define QFX5800NVA0 1
+static int
+nv50_mem_timing_calc(struct drm_device *dev, u32 freq,
+		     struct nouveau_pm_tbl_entry *e, u8 len,
+		     struct nouveau_pm_memtiming *boot,
+		     struct nouveau_pm_memtiming *t)
+{
+	struct nouveau_device *device = nouveau_dev(dev);
+	struct nouveau_fb *pfb = nouveau_fb(device);
+	struct nouveau_drm *drm = nouveau_drm(dev);
+	struct bit_entry P;
+	uint8_t unk18 = 1, unk20 = 0, unk21 = 0, tmp7_3;
+
+	if (bit_table(dev, 'P', &P))
+		return -EINVAL;
+
+	switch (min(len, (u8) 22)) {
+	case 22:
+		unk21 = e->tUNK_21;
+	case 21:
+		unk20 = e->tUNK_20;
+	case 20:
+		if (e->tCWL > 0)
+			t->tCWL = e->tCWL;
+	case 19:
+		unk18 = e->tUNK_18;
+		break;
+	}
+
+	t->reg[0] = (e->tRP << 24 | e->tRAS << 16 | e->tRFC << 8 | e->tRC);
+
+	t->reg[1] = (e->tWR + 2 + (t->tCWL - 1)) << 24 |
+				max(unk18, (u8) 1) << 16 |
+				(e->tWTR + 2 + (t->tCWL - 1)) << 8;
+
+	t->reg[2] = ((t->tCWL - 1) << 24 |
+		    e->tRRD << 16 |
+		    e->tRCDWR << 8 |
+		    e->tRCDRD);
+
+	t->reg[4] = e->tUNK_13 << 8  | e->tUNK_13;
+
+	t->reg[5] = (e->tRFC << 24 | max(e->tRCDRD, e->tRCDWR) << 16 | e->tRP);
+
+	t->reg[8] = boot->reg[8] & 0xffffff00;
+
+		t->reg[1] |= (e->tCL + 2 - (t->tCWL - 1));
+
+		t->reg[3] = (0x14 + e->tCL) << 24 |
+			    0x16 << 16 |
+			    (e->tCL - 1) << 8 |
+			    (e->tCL - 1);
+
+		t->reg[4] |= boot->reg[4] & 0xffff0000;
+
+		t->reg[6] = (0x33 - t->tCWL) << 16 |
+			    t->tCWL << 8 |
+			    (0x2e + e->tCL - t->tCWL);
+
+		t->reg[7] = 0x4000202 | (e->tCL - 1) << 16;
+
+		/* XXX: P.version == 1 only has DDR2 and GDDR3? */
+		if (pfb->ram->type == NV_MEM_TYPE_DDR2) {
+			t->reg[5] |= (e->tCL + 3) << 8;
+			t->reg[6] |= (t->tCWL - 2) << 8;
+			t->reg[8] |= (e->tCL - 4);
+		} else {
+			t->reg[5] |= (e->tCL + 2) << 8;
+			t->reg[6] |= t->tCWL << 8;
+			t->reg[8] |= (e->tCL - 2);
+		}
+
+	NV_DEBUG(drm, "Entry %d: 220: %08x %08x %08x %08x\n", t->id,
+		 t->reg[0], t->reg[1], t->reg[2], t->reg[3]);
+	NV_DEBUG(drm, "         230: %08x %08x %08x %08x\n",
+		 t->reg[4], t->reg[5], t->reg[6], t->reg[7]);
+	NV_DEBUG(drm, "         240: %08x\n", t->reg[8]);
+	return 0;
+}
+
+/**
+ * MR generation methods
+ */
+
+static int
+nouveau_mem_ddr2_mr(struct drm_device *dev, u32 freq,
+		    struct nouveau_pm_tbl_entry *e, u8 len,
+		    struct nouveau_pm_memtiming *boot,
+		    struct nouveau_pm_memtiming *t)
+{
+	struct nouveau_drm *drm = nouveau_drm(dev);
+
+	t->drive_strength = 0;
+	if (len < 15) {
+		t->odt = boot->odt;
+	} else {
+		t->odt = e->RAM_FT1 & 0x07;
+	}
+
+	if (e->tCL >= NV_MEM_CL_DDR2_MAX) {
+		NV_WARN(drm, "(%u) Invalid tCL: %u", t->id, e->tCL);
+		return -ERANGE;
+	}
+
+	if (e->tWR >= NV_MEM_WR_DDR2_MAX) {
+		NV_WARN(drm, "(%u) Invalid tWR: %u", t->id, e->tWR);
+		return -ERANGE;
+	}
+
+	if (t->odt > 3) {
+		NV_WARN(drm, "(%u) Invalid odt value, assuming disabled: %x",
+			t->id, t->odt);
+		t->odt = 0;
+	}
+
+	t->mr[0] = (boot->mr[0] & 0x100f) |
+		   (e->tCL) << 4 |
+		   (e->tWR - 1) << 9;
+	t->mr[1] = (boot->mr[1] & 0x101fbb) |
+		   (t->odt & 0x1) << 2 |
+		   (t->odt & 0x2) << 5;
+
+	NV_DEBUG(drm, "(%u) MR: %08x", t->id, t->mr[0]);
+	return 0;
+}
+
+static const uint8_t nv_mem_wr_lut_ddr3[NV_MEM_WR_DDR3_MAX] = {
+	0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 5, 6, 6, 7, 7, 0, 0};
+
+static int
+nouveau_mem_ddr3_mr(struct drm_device *dev, u32 freq,
+		    struct nouveau_pm_tbl_entry *e, u8 len,
+		    struct nouveau_pm_memtiming *boot,
+		    struct nouveau_pm_memtiming *t)
+{
+	struct nouveau_drm *drm = nouveau_drm(dev);
+	u8 cl = e->tCL - 4;
+
+	t->drive_strength = 0;
+	if (len < 15) {
+		t->odt = boot->odt;
+	} else {
+		t->odt = e->RAM_FT1 & 0x07;
+	}
+
+	if (e->tCL >= NV_MEM_CL_DDR3_MAX || e->tCL < 4) {
+		NV_WARN(drm, "(%u) Invalid tCL: %u", t->id, e->tCL);
+		return -ERANGE;
+	}
+
+	if (e->tWR >= NV_MEM_WR_DDR3_MAX || e->tWR < 4) {
+		NV_WARN(drm, "(%u) Invalid tWR: %u", t->id, e->tWR);
+		return -ERANGE;
+	}
+
+	if (e->tCWL < 5) {
+		NV_WARN(drm, "(%u) Invalid tCWL: %u", t->id, e->tCWL);
+		return -ERANGE;
+	}
+
+	t->mr[0] = (boot->mr[0] & 0x180b) |
+		   /* CAS */
+		   (cl & 0x7) << 4 |
+		   (cl & 0x8) >> 1 |
+		   (nv_mem_wr_lut_ddr3[e->tWR]) << 9;
+	t->mr[1] = (boot->mr[1] & 0x101dbb) |
+		   (t->odt & 0x1) << 2 |
+		   (t->odt & 0x2) << 5 |
+		   (t->odt & 0x4) << 7;
+	t->mr[2] = (boot->mr[2] & 0x20ffb7) | (e->tCWL - 5) << 3;
+
+	NV_DEBUG(drm, "(%u) MR: %08x %08x", t->id, t->mr[0], t->mr[2]);
+	return 0;
+}
+
+static const uint8_t nv_mem_cl_lut_gddr3[NV_MEM_CL_GDDR3_MAX] = {
+	0, 0, 0, 0, 4, 5, 6, 7, 0, 1, 2, 3, 8, 9, 10, 11};
+static const uint8_t nv_mem_wr_lut_gddr3[NV_MEM_WR_GDDR3_MAX] = {
+	0, 0, 0, 0, 0, 2, 3, 8, 9, 10, 11, 0, 0, 1, 1, 0, 3};
+
+static int
+nouveau_mem_gddr3_mr(struct drm_device *dev, u32 freq,
+		     struct nouveau_pm_tbl_entry *e, u8 len,
+		     struct nouveau_pm_memtiming *boot,
+		     struct nouveau_pm_memtiming *t)
+{
+	struct nouveau_drm *drm = nouveau_drm(dev);
+
+	if (len < 15) {
+		t->drive_strength = boot->drive_strength;
+		t->odt = boot->odt;
+	} else {
+		t->drive_strength = (e->RAM_FT1 & 0x30) >> 4;
+		t->odt = e->RAM_FT1 & 0x07;
+	}
+
+	if (e->tCL >= NV_MEM_CL_GDDR3_MAX) {
+		NV_WARN(drm, "(%u) Invalid tCL: %u", t->id, e->tCL);
+		return -ERANGE;
+	}
+
+	if (e->tWR >= NV_MEM_WR_GDDR3_MAX) {
+		NV_WARN(drm, "(%u) Invalid tWR: %u", t->id, e->tWR);
+		return -ERANGE;
+	}
+
+	if (t->odt > 3) {
+		NV_WARN(drm, "(%u) Invalid odt value, assuming autocal: %x",
+			t->id, t->odt);
+		t->odt = 0;
+	}
+
+	t->mr[0] = (boot->mr[0] & 0xe0b) |
+		   /* CAS */
+		   ((nv_mem_cl_lut_gddr3[e->tCL] & 0x7) << 4) |
+		   ((nv_mem_cl_lut_gddr3[e->tCL] & 0x8) >> 2);
+	t->mr[1] = (boot->mr[1] & 0x100f40) | t->drive_strength |
+		   (t->odt << 2) |
+		   (nv_mem_wr_lut_gddr3[e->tWR] & 0xf) << 4;
+	t->mr[2] = boot->mr[2];
+
+	NV_DEBUG(drm, "(%u) MR: %08x %08x %08x", t->id,
+		      t->mr[0], t->mr[1], t->mr[2]);
+	return 0;
+}
+
 
 static int
 nv50_ram_calc(struct nouveau_fb *pfb, u32 freq)
@@ -122,9 +346,10 @@ nv50_ram_calc(struct nouveau_fb *pfb, u32 freq)
 	ram_wait(hwsq, 0x01, 0x01); /* wait for vblank */
 	ram_wr32(hwsq, 0x611200, 0x00003300);
 	ram_wr32(hwsq, 0x002504, 0x00000001); /* block fifo */
-	ram_nsec(hwsq, 8000);
+	ram_nsec(hwsq, 12000);
 	ram_setf(hwsq, 0x10, 0x00); /* disable fb */
 	ram_wait(hwsq, 0x00, 0x01); /* wait for fb disabled */
+	ram_nsec(hwsq, 2000);
 
 	ram_wr32(hwsq, 0x1002d4, 0x00000001); /* precharge */
 	ram_wr32(hwsq, 0x1002d0, 0x00000001); /* refresh */
@@ -145,21 +370,95 @@ nv50_ram_calc(struct nouveau_fb *pfb, u32 freq)
 		return ret;
 
 	ram_mask(hwsq, 0x00c040, 0xc000c000, 0x0000c000);
+	ram_nuke(hwsq, 0x004008);
+	/* g86 |= 8200 */
 	ram_mask(hwsq, 0x004008, 0x00000200, 0x00000200);
-	ram_mask(hwsq, 0x00400c, 0x0000ffff, (N1 << 8) | M1);
-	ram_mask(hwsq, 0x004008, 0x81ff0000, 0x80000000 | (mpll.bias_p << 19) |
+	ram_mask(hwsq, 0x00400c, 0x0000ffff, (N1 << 8) | M1); /* XXX */
+	/* g86: 200 bit not cleared */
+	ram_mask(hwsq, 0x004008, 0x81ff0200, 0x80000000 | (mpll.bias_p << 19) |
+
 					     (P << 22) | (P << 16));
-#if QFX5800NVA0
-	for (i = 0; i < 8; i++)
-		ram_mask(hwsq, 0x100da0[i], 0x00000000, 0x00000000); /*XXX*/
-#endif
+	/* XXX # of partitions, not hardcoded to 8 */
+	/* XXX need to toggle the 0x10 bit either on or off */
+	/* xxx did this replace the 10053c manipulation? */
+	/* xxx or does one use 10053c for pre-g92? or for ddr vs gddr? */
+	for (i = 0; i < ram->parts; i++)
+		ram_mask(hwsq, 0x100da0[i], 0x00000010, 0x00000000); /*XXX*/
 	ram_nsec(hwsq, 96000); /*XXX*/
-	ram_mask(hwsq, 0x004008, 0x00002200, 0x00002000);
+
+	/* xxx note: g94 with 4 da0 writes + 64000 wait */
+	/* xxx note: g92 with 4 da0 writes + no wait */
+	/* xxx note: g200 with 8 da0 writes + 96000 wait */
+
+.	ram_mask(hwsq, 0x004008, 0x00002200, 0x00002000);
 
 	ram_wr32(hwsq, 0x1002dc, 0x00000000); /* disable self-refresh */
 	ram_wr32(hwsq, 0x100210, 0x80000000); /* enable auto-refresh */
 
 	ram_nsec(hwsq, 12000);
+
+/*
+
+	ramcfg = nouveau_perf_ramcfg(dev, freq, &ver, &len);
+	if (ramcfg) {
+		int dll_off;
+
+		if (ver == 0x00)
+			dll_off = !!(ramcfg[3] & 0x04);
+		else
+			dll_off = !!(ramcfg[2] & 0x40);
+
+		switch (pfb->ram->type) {
+		case NV_MEM_TYPE_GDDR3:
+			t->mr[1] &= ~0x00000040;
+			t->mr[1] |=  0x00000040 * dll_off;
+			break;
+		default:
+			t->mr[1] &= ~0x00000001;
+			t->mr[1] |=  0x00000001 * dll_off;
+			break;
+		}
+	}
+
+	t->odt = 0;
+	t->drive_strength = 0;
+
+	switch (pfb->ram->type) {
+	case NV_MEM_TYPE_DDR3:
+		t->odt |= (t->mr[1] & 0x200) >> 7;
+	case NV_MEM_TYPE_DDR2:
+		t->odt |= (t->mr[1] & 0x04) >> 2 |
+			  (t->mr[1] & 0x40) >> 5;
+		break;
+	case NV_MEM_TYPE_GDDR3:
+	case NV_MEM_TYPE_GDDR5:
+		t->drive_strength = t->mr[1] & 0x03;
+		t->odt = (t->mr[1] & 0x0c) >> 2;
+		break;
+	default:
+		break;
+	}
+
+	switch (pfb->ram->type) {
+	case NV_MEM_TYPE_DDR2:
+		tDLLK = 2000;
+		mr1_dlloff = 0x00000001;
+		break;
+	case NV_MEM_TYPE_DDR3:
+		tDLLK = 12000;
+		tCKSRE = 2000;
+		tXS = 1000;
+		mr1_dlloff = 0x00000001;
+		break;
+	case NV_MEM_TYPE_GDDR3:
+		tDLLK = 40000;
+		mr1_dlloff = 0x00000040;
+		break;
+	default:
+		NV_ERROR(drm, "cannot reclock unsupported memtype\n");
+		return -ENODEV;
+	}
+*/
 
 	switch (ram->base.type) {
 	case NV_MEM_TYPE_DDR2:
@@ -167,9 +466,10 @@ nv50_ram_calc(struct nouveau_fb *pfb, u32 freq)
 		ram_mask(hwsq, mr[0], 0x000, 0x000);
 		break;
 	case NV_MEM_TYPE_GDDR3:
-		ram_mask(hwsq, mr[2], 0x000, 0x000);
+		ram_nuke(hwsq, mr[1]);
+		ram_mask(hwsq, mr[1], 0x000, 0x000); /* XXX 1002b8 -> 100228 */
 		ram_nuke(hwsq, mr[0]); /* force update */
-		ram_mask(hwsq, mr[0], 0x000, 0x000);
+		ram_mask(hwsq, mr[0], 0x000, 0x000); /* XXX 222 -> 252 */
 		break;
 	default:
 		break;
@@ -180,22 +480,22 @@ nv50_ram_calc(struct nouveau_fb *pfb, u32 freq)
 	ram_mask(hwsq, timing[6], 0x00000000, 0x00000000); /*XXX*/
 	ram_mask(hwsq, timing[7], 0x00000000, 0x00000000); /*XXX*/
 	ram_mask(hwsq, timing[8], 0x00000000, 0x00000000); /*XXX*/
-	ram_mask(hwsq, timing[0], 0x00000000, 0x00000000); /*XXX*/
 	ram_mask(hwsq, timing[2], 0x00000000, 0x00000000); /*XXX*/
 	ram_mask(hwsq, timing[4], 0x00000000, 0x00000000); /*XXX*/
 	ram_mask(hwsq, timing[5], 0x00000000, 0x00000000); /*XXX*/
-
 	ram_mask(hwsq, timing[0], 0x00000000, 0x00000000); /*XXX*/
 
-#if QFX5800NVA0
-	ram_nuke(hwsq, 0x100e24);
-	ram_mask(hwsq, 0x100e24, 0x00000000, 0x00000000);
-	ram_nuke(hwsq, 0x100e20);
-	ram_mask(hwsq, 0x100e20, 0x00000000, 0x00000000);
-#endif
+	if (pfb->device->chipset == 0xa0) { /* XXX perhaps ranks related? */
+		ram_nuke(hwsq, 0x100e24);
+		ram_mask(hwsq, 0x100e24, 0x00000000, 0x00000000);
+		ram_nuke(hwsq, 0x100e20);
+		ram_mask(hwsq, 0x100e20, 0x00000000, 0x00000000);
+	}
 
-	ram_mask(hwsq, mr[0], 0x100, 0x100);
-	ram_mask(hwsq, mr[0], 0x100, 0x000);
+	ram_mask(hwsq, mr[0], 0x100, 0x100); /* XXX 352 */
+	ram_mask(hwsq, mr[0], 0x100, 0x000); /* XXX 252 */
+
+	ram_nsec(hwsq, 48000);
 
 	ram_setf(hwsq, 0x10, 0x01); /* enable fb */
 	ram_wait(hwsq, 0x00, 0x00); /* wait for fb enabled */
@@ -210,8 +510,13 @@ nv50_ram_prog(struct nouveau_fb *pfb)
 	struct nouveau_device *device = nv_device(pfb);
 	struct nv50_ram *ram = (void *)pfb->ram;
 	struct nv50_ramseq *hwsq = &ram->hwsq;
+	u32 config = nv_rd32(pfb, 0x100200);
 
+	if (config & 0x800)
+		nv_wr32(pfb, 0x100200, config & ~0x800);
 	ram_exec(hwsq, nouveau_boolopt(device->cfgopt, "NvMemExec", true));
+	if (config & 0x800)
+		nv_wr32(pfb, 0x100200, config);
 	return 0;
 }
 
@@ -328,6 +633,8 @@ nv50_fb_vram_rblock(struct nouveau_fb *pfb, struct nouveau_ram *ram)
 	rt = nv_rd32(pfb, 0x100250);
 	nv_debug(pfb, "memcfg 0x%08x 0x%08x 0x%08x 0x%08x\n", r0, r4, rt,
 			nv_rd32(pfb, 0x001540));
+
+	ram->parts = parts;
 
 	colbits  =  (r4 & 0x0000f000) >> 12;
 	rowbitsa = ((r4 & 0x000f0000) >> 16) + 8;
