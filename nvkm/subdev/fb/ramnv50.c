@@ -60,180 +60,105 @@ struct nv50_ram {
 	struct nv50_ramseq hwsq;
 };
 
+struct nv50_mem_timing_entry {
+	u8 tWR;
+	u8 tWTR;
+	u8 tCL;
+	u8 tRC;
+	/*u8 empty_4;*/
+	u8 tRFC;        /* Byte 5 */
+	/*u8 empty_6;*/
+	u8 tRAS;        /* Byte 7 */
+	/*u8 empty_8;*/
+	u8 tRP;         /* Byte 9 */
+	u8 tRCDRD;
+	u8 tRCDWR;
+	u8 tRRD;
+	u8 tUNK_13;
+	u8 RAM_FT1;     /* 14, a bitmask of random RAM features */
+	/*u8 empty_15;*/
+	u8 tUNK_16;
+	/*u8 empty_17;*/
+	u8 tUNK_18;
+	u8 tCWL;
+	u8 tUNK_20, tUNK_21;
+};
+
 static int
-nv50_mem_timing_calc(struct drm_device *dev, u32 freq,
-		     struct nouveau_pm_tbl_entry *e, u8 len,
-		     struct nouveau_pm_memtiming *boot,
-		     struct nouveau_pm_memtiming *t)
+nv50_mem_timing_calc(struct nouveau_fb *pfb, u16 data, u32 *timing)
 {
-	struct nouveau_device *device = nouveau_dev(dev);
-	struct nouveau_fb *pfb = nouveau_fb(device);
-	struct nouveau_drm *drm = nouveau_drm(dev);
-	struct bit_entry P;
-	uint8_t unk18 = 1, unk20 = 0, unk21 = 0, tmp7_3;
+	struct nv50_ram *ram = (void *)pfb->ram;
+	struct nouveau_bios *bios = nouveau_bios(pfb);
+	struct nv50_mem_timing_entry e;
+	u32 cur8;
 
-	if (bit_table(dev, 'P', &P))
-		return -EINVAL;
+	cur8 = nv_rd32(pfb, 0x100240);
 
-	switch (min(len, (u8) 22)) {
-	case 22:
-		unk21 = e->tUNK_21;
-	case 21:
-		unk20 = e->tUNK_20;
-	case 20:
-		if (e->tCWL > 0)
-			t->tCWL = e->tCWL;
-	case 19:
-		unk18 = e->tUNK_18;
-		break;
+	/* Copy values from VBIOS */
+	e.tWR     = nv_ro08(bios, data + 0);
+	e.tWTR    = nv_ro08(bios, data + 1);
+	e.tCL     = nv_ro08(bios, data + 2);
+	e.tRC     = nv_ro08(bios, data + 3);
+	e.tRFC    = nv_ro08(bios, data + 5);
+	e.tRAS    = nv_ro08(bios, data + 7);
+	e.tRP     = nv_ro08(bios, data + 9);
+	e.tRCDRD  = nv_ro08(bios, data + 10);
+	e.tRCDWR  = nv_ro08(bios, data + 11);
+	e.tRRD    = nv_ro08(bios, data + 12);
+	e.tUNK_13 = nv_ro08(bios, data + 13);
+	e.tUNK_16 = nv_ro08(bios, data + 16);
+	/* XXX make sure the length is big enough */
+	e.tUNK_18 = nv_ro08(bios, data + 18);
+	e.tCWL    = nv_ro08(bios, data + 19);
+	e.tUNK_20 = nv_ro08(bios, data + 20);
+	e.tUNK_21 = nv_ro08(bios, data + 21);
+
+	if (e.tCWL == 0)
+		e.tCWL = ((nv_rd32(pfb, 0x100228) & 0x0f000000) >> 24) + 1;
+
+	timing[0] = (e.tRP << 24 | e.tRAS << 16 | e.tRFC << 8 | e.tRC);
+	timing[1] = (e.tWR + 2 + (e.tCWL - 1)) << 24 |
+		max(e.tUNK_18, (u8) 1) << 16 |
+		(e.tWTR + 2 + (e.tCWL - 1)) << 8 |
+		(e.tCL + 2 - (e.tCWL - 1));
+	timing[2] = ((e.tCWL - 1) << 24 |
+		    e.tRRD << 16 |
+		    e.tRCDWR << 8 |
+		    e.tRCDRD);
+	timing[3] = (0x14 + e.tCL) << 24 |
+		0x16 << 16 |
+		(e.tCL - 1) << 8 |
+		(e.tCL - 1);
+	timing[4] = e.tUNK_13 << 8  | e.tUNK_13 |
+		boot->reg[4] & 0xffff0000;
+	timing[5] = (e.tRFC << 24 | max(e.tRCDRD, e.tRCDWR) << 16 | e.tRP);
+	timing[6] = (0x33 - e.tCWL) << 16 |
+		e.tCWL << 8 |
+		(0x2e + e.tCL - e.tCWL);
+	timing[7] = 0x4000202 | (e.tCL - 1) << 16;
+	timing[8] = cur8 & 0xffffff00;
+
+	/* XXX: P.version == 1 only has DDR2 and GDDR3? */
+	if (pfb->ram->type == NV_MEM_TYPE_DDR2) {
+		timing[5] |= (e.tCL + 3) << 8;
+		timing[6] |= (e.tCWL - 2) << 8;
+		timing[8] |= (e.tCL - 4);
+	} else {
+		timing[5] |= (e.tCL + 2) << 8;
+		timing[6] |= e.tCWL << 8;
+		timing[8] |= (e.tCL - 2);
 	}
 
-	t->reg[0] = (e->tRP << 24 | e->tRAS << 16 | e->tRFC << 8 | e->tRC);
-
-	t->reg[1] = (e->tWR + 2 + (t->tCWL - 1)) << 24 |
-				max(unk18, (u8) 1) << 16 |
-				(e->tWTR + 2 + (t->tCWL - 1)) << 8;
-
-	t->reg[2] = ((t->tCWL - 1) << 24 |
-		    e->tRRD << 16 |
-		    e->tRCDWR << 8 |
-		    e->tRCDRD);
-
-	t->reg[4] = e->tUNK_13 << 8  | e->tUNK_13;
-
-	t->reg[5] = (e->tRFC << 24 | max(e->tRCDRD, e->tRCDWR) << 16 | e->tRP);
-
-	t->reg[8] = boot->reg[8] & 0xffffff00;
-
-		t->reg[1] |= (e->tCL + 2 - (t->tCWL - 1));
-
-		t->reg[3] = (0x14 + e->tCL) << 24 |
-			    0x16 << 16 |
-			    (e->tCL - 1) << 8 |
-			    (e->tCL - 1);
-
-		t->reg[4] |= boot->reg[4] & 0xffff0000;
-
-		t->reg[6] = (0x33 - t->tCWL) << 16 |
-			    t->tCWL << 8 |
-			    (0x2e + e->tCL - t->tCWL);
-
-		t->reg[7] = 0x4000202 | (e->tCL - 1) << 16;
-
-		/* XXX: P.version == 1 only has DDR2 and GDDR3? */
-		if (pfb->ram->type == NV_MEM_TYPE_DDR2) {
-			t->reg[5] |= (e->tCL + 3) << 8;
-			t->reg[6] |= (t->tCWL - 2) << 8;
-			t->reg[8] |= (e->tCL - 4);
-		} else {
-			t->reg[5] |= (e->tCL + 2) << 8;
-			t->reg[6] |= t->tCWL << 8;
-			t->reg[8] |= (e->tCL - 2);
-		}
-
-	NV_DEBUG(drm, "Entry %d: 220: %08x %08x %08x %08x\n", t->id,
-		 t->reg[0], t->reg[1], t->reg[2], t->reg[3]);
+	NV_DEBUG(drm, "Entry: 220: %08x %08x %08x %08x\n",
+		 timing[0], timing[1], timing[2], timing[3]);
 	NV_DEBUG(drm, "         230: %08x %08x %08x %08x\n",
-		 t->reg[4], t->reg[5], t->reg[6], t->reg[7]);
-	NV_DEBUG(drm, "         240: %08x\n", t->reg[8]);
+		 timing[4], timing[5], timing[6], timing[7]);
+	NV_DEBUG(drm, "         240: %08x\n", timing[8]);
 	return 0;
 }
 
-/**
- * MR generation methods
- */
 
-static int
-nouveau_mem_ddr2_mr(struct drm_device *dev, u32 freq,
-		    struct nouveau_pm_tbl_entry *e, u8 len,
-		    struct nouveau_pm_memtiming *boot,
-		    struct nouveau_pm_memtiming *t)
-{
-	struct nouveau_drm *drm = nouveau_drm(dev);
-
-	t->drive_strength = 0;
-	if (len < 15) {
-		t->odt = boot->odt;
-	} else {
-		t->odt = e->RAM_FT1 & 0x07;
-	}
-
-	if (e->tCL >= NV_MEM_CL_DDR2_MAX) {
-		NV_WARN(drm, "(%u) Invalid tCL: %u", t->id, e->tCL);
-		return -ERANGE;
-	}
-
-	if (e->tWR >= NV_MEM_WR_DDR2_MAX) {
-		NV_WARN(drm, "(%u) Invalid tWR: %u", t->id, e->tWR);
-		return -ERANGE;
-	}
-
-	if (t->odt > 3) {
-		NV_WARN(drm, "(%u) Invalid odt value, assuming disabled: %x",
-			t->id, t->odt);
-		t->odt = 0;
-	}
-
-	t->mr[0] = (boot->mr[0] & 0x100f) |
-		   (e->tCL) << 4 |
-		   (e->tWR - 1) << 9;
-	t->mr[1] = (boot->mr[1] & 0x101fbb) |
-		   (t->odt & 0x1) << 2 |
-		   (t->odt & 0x2) << 5;
-
-	NV_DEBUG(drm, "(%u) MR: %08x", t->id, t->mr[0]);
-	return 0;
-}
-
-static const uint8_t nv_mem_wr_lut_ddr3[NV_MEM_WR_DDR3_MAX] = {
-	0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 5, 6, 6, 7, 7, 0, 0};
-
-static int
-nouveau_mem_ddr3_mr(struct drm_device *dev, u32 freq,
-		    struct nouveau_pm_tbl_entry *e, u8 len,
-		    struct nouveau_pm_memtiming *boot,
-		    struct nouveau_pm_memtiming *t)
-{
-	struct nouveau_drm *drm = nouveau_drm(dev);
-	u8 cl = e->tCL - 4;
-
-	t->drive_strength = 0;
-	if (len < 15) {
-		t->odt = boot->odt;
-	} else {
-		t->odt = e->RAM_FT1 & 0x07;
-	}
-
-	if (e->tCL >= NV_MEM_CL_DDR3_MAX || e->tCL < 4) {
-		NV_WARN(drm, "(%u) Invalid tCL: %u", t->id, e->tCL);
-		return -ERANGE;
-	}
-
-	if (e->tWR >= NV_MEM_WR_DDR3_MAX || e->tWR < 4) {
-		NV_WARN(drm, "(%u) Invalid tWR: %u", t->id, e->tWR);
-		return -ERANGE;
-	}
-
-	if (e->tCWL < 5) {
-		NV_WARN(drm, "(%u) Invalid tCWL: %u", t->id, e->tCWL);
-		return -ERANGE;
-	}
-
-	t->mr[0] = (boot->mr[0] & 0x180b) |
-		   /* CAS */
-		   (cl & 0x7) << 4 |
-		   (cl & 0x8) >> 1 |
-		   (nv_mem_wr_lut_ddr3[e->tWR]) << 9;
-	t->mr[1] = (boot->mr[1] & 0x101dbb) |
-		   (t->odt & 0x1) << 2 |
-		   (t->odt & 0x2) << 5 |
-		   (t->odt & 0x4) << 7;
-	t->mr[2] = (boot->mr[2] & 0x20ffb7) | (e->tCWL - 5) << 3;
-
-	NV_DEBUG(drm, "(%u) MR: %08x %08x", t->id, t->mr[0], t->mr[2]);
-	return 0;
-}
-
+/*
 static const uint8_t nv_mem_cl_lut_gddr3[NV_MEM_CL_GDDR3_MAX] = {
 	0, 0, 0, 0, 4, 5, 6, 7, 0, 1, 2, 3, 8, 9, 10, 11};
 static const uint8_t nv_mem_wr_lut_gddr3[NV_MEM_WR_GDDR3_MAX] = {
@@ -272,7 +197,7 @@ nouveau_mem_gddr3_mr(struct drm_device *dev, u32 freq,
 	}
 
 	t->mr[0] = (boot->mr[0] & 0xe0b) |
-		   /* CAS */
+		   /* CAS * /
 		   ((nv_mem_cl_lut_gddr3[e->tCL] & 0x7) << 4) |
 		   ((nv_mem_cl_lut_gddr3[e->tCL] & 0x8) >> 2);
 	t->mr[1] = (boot->mr[1] & 0x100f40) | t->drive_strength |
@@ -284,7 +209,7 @@ nouveau_mem_gddr3_mr(struct drm_device *dev, u32 freq,
 		      t->mr[0], t->mr[1], t->mr[2]);
 	return 0;
 }
-
+*/
 
 static int
 nv50_ram_calc(struct nouveau_fb *pfb, u32 freq)
@@ -299,6 +224,7 @@ nv50_ram_calc(struct nouveau_fb *pfb, u32 freq)
 		u8  size;
 	} ramcfg, timing;
 	u8  ver, hdr, cnt, len, strap;
+	u32 timing_vals[9];
 	int N1, M1, N2, M2, P;
 	int ret, i;
 
@@ -475,15 +401,15 @@ nv50_ram_calc(struct nouveau_fb *pfb, u32 freq)
 		break;
 	}
 
-	ram_mask(hwsq, timing[3], 0x00000000, 0x00000000); /*XXX*/
-	ram_mask(hwsq, timing[1], 0x00000000, 0x00000000); /*XXX*/
-	ram_mask(hwsq, timing[6], 0x00000000, 0x00000000); /*XXX*/
-	ram_mask(hwsq, timing[7], 0x00000000, 0x00000000); /*XXX*/
-	ram_mask(hwsq, timing[8], 0x00000000, 0x00000000); /*XXX*/
-	ram_mask(hwsq, timing[2], 0x00000000, 0x00000000); /*XXX*/
-	ram_mask(hwsq, timing[4], 0x00000000, 0x00000000); /*XXX*/
-	ram_mask(hwsq, timing[5], 0x00000000, 0x00000000); /*XXX*/
-	ram_mask(hwsq, timing[0], 0x00000000, 0x00000000); /*XXX*/
+	ram_wr32(hwsq, timing[3], timing_vals[3]);
+	ram_wr32(hwsq, timing[1], timing_vals[1]);
+	ram_wr32(hwsq, timing[6], timing_vals[6]);
+	ram_wr32(hwsq, timing[7], timing_vals[7]);
+	ram_wr32(hwsq, timing[8], timing_vals[8]);
+	ram_wr32(hwsq, timing[2], timing_vals[2]);
+	ram_wr32(hwsq, timing[4], timing_vals[4]);
+	ram_wr32(hwsq, timing[5], timing_vals[5]);
+	ram_wr32(hwsq, timing[0], timing_vals[0]);
 
 	if (pfb->device->chipset == 0xa0) { /* XXX perhaps ranks related? */
 		ram_nuke(hwsq, 0x100e24);
