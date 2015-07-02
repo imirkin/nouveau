@@ -365,6 +365,7 @@ gt215_ram_timing_calc(struct nvkm_fb *pfb, u32 *timing)
 		T(CWL) = T(CL) - 1;
 		break;
 	case NV_MEM_TYPE_GDDR3:
+	case NV_MEM_TYPE_GDDR5:
 		T(CWL) = ((cur2 & 0xff000000) >> 24) + 1;
 		break;
 	}
@@ -408,6 +409,13 @@ gt215_ram_timing_calc(struct nvkm_fb *pfb, u32 *timing)
 		if (tUNK_40_0 > 0)
 			timing[8] |= T(CL);
 		break;
+	case NV_MEM_TYPE_GDDR5:
+		timing[4] |= T(21) << 20;
+		timing[5] &= ~0xff00U;
+		timing[5] |= max_t(u8, (T(CWL) + 6), (T(CL) + 5)) << 8;
+		timing[6] |= 6 << 24;
+		timing[6] += 8;
+		break;
 	default:
 		break;
 	}
@@ -448,6 +456,17 @@ nvkm_gddr3_dll_disable(struct gt215_ramfuc *fuc, u32 *mr)
 	u32 mr1_old = ram_rd32(fuc, mr[1]);
 
 	if (!(mr1_old & 0x40)) {
+		ram_wr32(fuc, mr[1], mr[1]);
+		ram_nsec(fuc, 1000);
+	}
+}
+
+static void
+nvkm_gddr5_dll_disable(struct gt215_ramfuc *fuc, u32 *mr)
+{
+	u32 mr1_old = ram_rd32(fuc, mr[1]);
+
+	if (!(mr1_old & 0x80)) {
 		ram_wr32(fuc, mr[1], mr[1]);
 		ram_nsec(fuc, 1000);
 	}
@@ -571,6 +590,9 @@ gt215_ram_calc(struct nvkm_fb *pfb, u32 freq)
 	case NV_MEM_TYPE_GDDR3:
 		ret = nvkm_gddr3_calc(&ram->base);
 		break;
+	case NV_MEM_TYPE_GDDR5:
+		ret = nvkm_gddr5_calc(&ram->base, false);
+		break;
 	default:
 		ret = -ENOSYS;
 		break;
@@ -636,6 +658,9 @@ gt215_ram_calc(struct nvkm_fb *pfb, u32 freq)
 		break;
 	case NV_MEM_TYPE_GDDR3:
 		nvkm_gddr3_dll_disable(fuc, ram->base.mr);
+		break;
+	case NV_MEM_TYPE_GDDR5:
+		nvkm_gddr5_dll_disable(fuc, ram->base.mr);
 		break;
 	}
 
