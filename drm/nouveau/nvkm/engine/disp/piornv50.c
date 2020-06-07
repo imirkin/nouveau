@@ -32,7 +32,7 @@ nv50_pior_clock(struct nvkm_ior *pior)
 {
 	struct nvkm_device *device = pior->disp->engine.subdev.device;
 	const u32 poff = nv50_ior_base(pior);
-	nvkm_mask(device, 0x614380 + poff, 0x00000707, 0x00000001);
+	nvkm_mask(device, 0x614380 + poff, 0x00000707, 0x00000000);
 }
 
 static int

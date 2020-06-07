@@ -1751,18 +1751,6 @@ nv50_sor_create(struct drm_connector *connector, struct dcb_output *dcbe)
 /******************************************************************************
  * PIOR
  *****************************************************************************/
-static int
-nv50_pior_atomic_check(struct drm_encoder *encoder,
-		       struct drm_crtc_state *crtc_state,
-		       struct drm_connector_state *conn_state)
-{
-	int ret = nv50_outp_atomic_check(encoder, crtc_state, conn_state);
-	if (ret)
-		return ret;
-	crtc_state->adjusted_mode.clock *= 2;
-	return 0;
-}
-
 static void
 nv50_pior_disable(struct drm_encoder *encoder)
 {
@@ -1809,7 +1797,7 @@ nv50_pior_enable(struct drm_encoder *encoder)
 
 static const struct drm_encoder_helper_funcs
 nv50_pior_help = {
-	.atomic_check = nv50_pior_atomic_check,
+	.atomic_check = nv50_outp_atomic_check,
 	.enable = nv50_pior_enable,
 	.disable = nv50_pior_disable,
 };
