@@ -1774,11 +1774,15 @@ nv50_pior_enable(struct drm_encoder *encoder)
 
 	nv50_outp_acquire(nv_encoder, false);
 
-	switch (asyh->or.bpc) {
-	case 10: asyh->or.depth = 0x6; break;
-	case  8: asyh->or.depth = 0x5; break;
-	case  6: asyh->or.depth = 0x2; break;
-	default: asyh->or.depth = 0x0; break;
+	if (nv50_disp(encoder->dev)->disp->object.oclass >= GT200_DISP) {
+		switch (asyh->or.bpc) {
+		case 10: asyh->or.depth = 0x6; break;
+		case  8: asyh->or.depth = 0x5; break;
+		case  6: asyh->or.depth = 0x2; break;
+		default: asyh->or.depth = 0x0; break;
+		}
+	} else {
+		asyh->or.depth = 0;
 	}
 
 	switch (nv_encoder->dcb->type) {
