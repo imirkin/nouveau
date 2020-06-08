@@ -865,6 +865,10 @@ nouveau_connector_detect_depth(struct drm_connector *connector)
 	struct drm_display_mode *mode = nv_connector->native_mode;
 	bool duallink;
 
+	/* HACK */
+	if (connector->display_info.bpc > 8)
+		connector->display_info.bpc = 8;
+
 	/* if the edid is feeling nice enough to provide this info, use it */
 	if (nv_connector->edid && connector->display_info.bpc)
 		return;
